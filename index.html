@@ -1,0 +1,1439 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>床下潜伏 - 解救人质</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  overflow: hidden; position: fixed; width: 100%; height: 100%;
+  touch-action: none; -ms-touch-action: none; overscroll-behavior: none;
+  background: #1a1a2e; color: #fff; font-family: 'Segoe UI', sans-serif;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+#hud {
+  height: 48px; display: flex; align-items: center; justify-content: space-around;
+  background: #0f0f23; padding: 0 8px; font-size: 14px; flex-shrink: 0;
+  border-bottom: 1px solid #333; gap: 4px; flex-wrap: nowrap;
+}
+#hud span { white-space: nowrap; }
+
+#canvasWrap {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  overflow: hidden; min-height: 0;
+}
+#gameCanvas { display: block; }
+
+#controls {
+  height: 140px; display: flex; flex-shrink: 0; padding: 8px; gap: 8px;
+  background: #0f0f23; border-top: 1px solid #333;
+}
+#dpad {
+  flex: 1; display: grid;
+  grid-template-areas: '. up .' 'left . right' '. down .';
+  grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr 1fr; gap: 4px;
+}
+#dpad button[data-dir="up"] { grid-area: up; }
+#dpad button[data-dir="left"] { grid-area: left; }
+#dpad button[data-dir="right"] { grid-area: right; }
+#dpad button[data-dir="down"] { grid-area: down; }
+
+#actions { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+
+#controls button {
+  background: rgba(255,255,255,0.12); border: 2px solid rgba(255,255,255,0.25);
+  border-radius: 8px; color: #fff; font-size: 16px; cursor: pointer;
+  min-height: 36px; min-width: 36px; display: flex; align-items: center;
+  justify-content: center; -webkit-tap-highlight-color: transparent;
+  transition: background 0.1s, transform 0.1s;
+}
+#controls button:active { background: rgba(255,255,255,0.35); transform: scale(0.93); }
+#actions button { flex: 1; }
+
+#muteBtn {
+  background: none; border: none; color: #fff; font-size: 18px; cursor: pointer;
+  padding: 4px 8px; -webkit-tap-highlight-color: transparent;
+}
+
+@media (max-width: 480px) {
+  #hud { height: 40px; font-size: 11px; padding: 0 4px; }
+  #controls { height: 120px; padding: 4px; }
+  #controls button { font-size: 14px; min-height: 32px; }
+}
+@media (min-width: 481px) and (max-width: 640px) {
+  #hud { height: 44px; font-size: 13px; }
+  #controls { height: 130px; }
+}
+@media (min-width: 641px) and (max-width: 768px) {
+  #hud { height: 52px; font-size: 15px; }
+  #controls { height: 160px; }
+  #controls button { font-size: 18px; border-radius: 12px; }
+}
+@media (orientation: landscape) and (max-height: 500px) {
+  body { flex-direction: row; }
+  #hud {
+    writing-mode: vertical-lr; height: auto; width: 44px;
+    flex-direction: column; border-bottom: none; border-right: 1px solid #333;
+    padding: 4px 0; font-size: 11px;
+  }
+  #controls { height: auto; width: 150px; flex-direction: column; border-top: none; border-left: 1px solid #333; }
+}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <span id="health">❤️ 100</span>
+  <span id="weapon">🔫 手枪 ∞</span>
+  <span id="armor">🛡️ --</span>
+  <span id="hostages">👥 0/9</span>
+  <span id="floor">📍 1F</span>
+  <button id="muteBtn">🔊</button>
+</div>
+
+<div id="canvasWrap">
+  <canvas id="gameCanvas"></canvas>
+</div>
+
+<div id="controls">
+  <div id="dpad">
+    <button data-dir="up">▲</button>
+    <button data-dir="left">◀</button>
+    <button data-dir="right">▶</button>
+    <button data-dir="down">▼</button>
+  </div>
+  <div id="actions">
+    <button id="fireBtn">🔫 开火</button>
+    <button id="hideBtn">🛏️ 躲藏</button>
+    <button id="switchBtn">🔄 切换武器</button>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// 常量与配置
+// ============================================================
+const C = {
+  GRID: 9, FLOORS: 3, MIN_TILE: 36,
+  PLAYER_HP: 100, TERROR_HP: 50, TERROR_DMG: 100, TERROR_DMG_ARMORED: 50, DETECT_RANGE: 2,
+  HOSTAGES_PER_FLOOR: 3, TOTAL_HOSTAGES: 9, TOTAL_TERRORISTS: 6,
+  GRENADE_RADIUS: 2, FIRE_DURATION: 3, FIRE_DMG: 30,
+  ARMOR_DUR: 100, ARMOR_RED: 0.5,
+  NOTIFY_DUR: 2000, FPS: 30
+};
+
+const TileType = { FLOOR:0, WALL:1, BED:2, STAIR_UP:3, STAIR_DOWN:4 };
+
+const WEAPON_CONFIGS = {
+  pistol:     { ammo:Infinity, maxAmmo:Infinity, damage:25, range:'line' },
+  ak47:       { ammo:30, maxAmmo:30, damage:35, range:'line' },
+  grenade:    { ammo:4, maxAmmo:4, damage:100, range:'radius' },
+  incendiary: { ammo:4, maxAmmo:4, damage:30, range:'tile' }
+};
+
+const WEAPON_NAMES = { pistol:'手枪', ak47:'AK47', grenade:'手榴弹', incendiary:'燃烧弹' };
+
+// ============================================================
+// 地图数据
+// ============================================================
+const FLOOR_1 = [
+  [1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,2,0,0,0,2,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,2,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,3,1],
+  [1,1,1,1,1,1,1,1,1]
+];
+const FLOOR_2 = [
+  [1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,2,0,0,0,2,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,2,0,0,0,0,0,1],
+  [1,4,0,0,0,0,0,3,1],
+  [1,1,1,1,1,1,1,1,1]
+];
+const FLOOR_3 = [
+  [1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,2,0,0,0,0,0,1],
+  [1,0,0,0,0,0,2,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,2,0,1],
+  [1,4,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1]
+];
+const MAPS = [FLOOR_1, FLOOR_2, FLOOR_3];
+
+// ============================================================
+// 地图系统
+// ============================================================
+function getTile(floor, x, y) {
+  if (x < 0 || x >= C.GRID || y < 0 || y >= C.GRID) return TileType.WALL;
+  return MAPS[floor - 1][y][x];
+}
+function isWalkable(floor, x, y) {
+  const t = getTile(floor, x, y);
+  return t === TileType.FLOOR || t === TileType.BED || t === TileType.STAIR_UP || t === TileType.STAIR_DOWN;
+}
+function getFloorTiles(floor) {
+  const tiles = [];
+  for (let y = 0; y < C.GRID; y++)
+    for (let x = 0; x < C.GRID; x++)
+      if (MAPS[floor-1][y][x] === TileType.FLOOR) tiles.push({x, y});
+  return tiles;
+}
+function getLineOfSight(floor, fx, fy, dir) {
+  const d = {up:{dx:0,dy:-1},down:{dx:0,dy:1},left:{dx:-1,dy:0},right:{dx:1,dy:0}}[dir];
+  const cells = [];
+  let x = fx + d.dx, y = fy + d.dy;
+  while (x >= 0 && x < C.GRID && y >= 0 && y < C.GRID) {
+    if (getTile(floor, x, y) === TileType.WALL) break;
+    cells.push({x, y});
+    x += d.dx; y += d.dy;
+  }
+  return cells;
+}
+
+// ============================================================
+// 工厂函数
+// ============================================================
+function createWeapon(type) {
+  const cfg = WEAPON_CONFIGS[type];
+  return { type, ammo: cfg.ammo, maxAmmo: cfg.maxAmmo, damage: cfg.damage, range: cfg.range };
+}
+function createPlayer() {
+  return {
+    x: 1, y: 1, floor: 1, health: C.PLAYER_HP,
+    status: 'active', facing: 'down',
+    equippedWeaponIndex: 0,
+    weapons: [createWeapon('pistol')],
+    bodyArmor: null, helmet: null, rescuedCount: 0
+  };
+}
+function createTerrorist(id, x, y, floor) {
+  return {
+    id, x, y, floor, health: C.TERROR_HP,
+    status: 'patrol', patrolPath: [], patrolIndex: 0, damage: C.TERROR_DMG, attackedThisTurn: false
+  };
+}
+function createHostage(id, x, y, floor) {
+  return { id, x, y, floor, rescued: false };
+}
+function createItem(id, type, x, y, floor) {
+  return { id, type, x, y, floor, pickedUp: false };
+}
+function createArmor(type) {
+  return { type, durability: C.ARMOR_DUR, damageReduction: C.ARMOR_RED };
+}
+
+// ============================================================
+// 游戏状态
+// ============================================================
+let state = null;
+let screenBtn = null;
+let tileSize = 40;
+let lastRenderTime = 0;
+
+function createGameState() {
+  return {
+    phase: 'start', currentFloor: 1, turnCount: 0,
+    startTime: null, eliminatedCount: 0,
+    player: createPlayer(),
+    terrorists: [], hostages: [], items: [],
+    fireZones: [], notifications: [], audioEnabled: true
+  };
+}
+
+// ============================================================
+// 随机分布实体
+// ============================================================
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function initGame() {
+  state = createGameState();
+  state.phase = 'playing';
+  state.startTime = Date.now();
+  state.player = createPlayer();
+
+  // 收集每层可用地板格
+  const floorTiles = [1,2,3].map(f => shuffle(getFloorTiles(f)));
+  const usedPositions = [[],[],[]]; // 每层已使用的位置
+
+  function takePosition(floorIdx) {
+    const tiles = floorTiles[floorIdx];
+    const used = usedPositions[floorIdx];
+    for (let i = 0; i < tiles.length; i++) {
+      const t = tiles[i];
+      // 避免玩家起始位置
+      if (floorIdx === 0 && t.x === 1 && t.y === 1) continue;
+      if (!used.some(u => u.x === t.x && u.y === t.y)) {
+        used.push({x: t.x, y: t.y});
+        tiles.splice(i, 1);
+        return t;
+      }
+    }
+    return tiles.pop();
+  }
+
+  // 人质：每层3个
+  let hId = 0;
+  for (let f = 0; f < 3; f++) {
+    for (let i = 0; i < C.HOSTAGES_PER_FLOOR; i++) {
+      const pos = takePosition(f);
+      if (pos) state.hostages.push(createHostage(hId++, pos.x, pos.y, f + 1));
+    }
+  }
+
+  // 恐怖分子：6个，每层至少1个
+  let tId = 0;
+  const terrorDist = [2, 2, 2]; // 每层2个
+  for (let f = 0; f < 3; f++) {
+    for (let i = 0; i < terrorDist[f]; i++) {
+      const pos = takePosition(f);
+      if (pos) {
+        const t = createTerrorist(tId++, pos.x, pos.y, f + 1);
+        generatePatrolPath(t, f + 1);
+        state.terrorists.push(t);
+      }
+    }
+  }
+
+  // 物品：随机分布在3层
+  const itemTypes = ['ak47','pistol','grenade','incendiary','bodyArmor','helmet'];
+  let iId = 0;
+  const shuffledFloors = shuffle([0,1,2,0,1,2]); // 6个物品分配到楼层
+  itemTypes.forEach((type, idx) => {
+    const f = shuffledFloors[idx];
+    const pos = takePosition(f);
+    if (pos) state.items.push(createItem(iId++, type, pos.x, pos.y, f + 1));
+  });
+
+  AudioSystem.init();
+  AudioSystem.playBGM();
+  updateHUD();
+}
+
+function resetGame() {
+  AudioSystem.stopBGM();
+  state = createGameState();
+  screenBtn = null;
+  updateHUD();
+}
+
+// ============================================================
+// 恐怖分子AI系统
+// ============================================================
+function generatePatrolPath(terrorist, floor) {
+  const path = [];
+  const dirs = [{dx:0,dy:-1},{dx:0,dy:1},{dx:-1,dy:0},{dx:1,dy:0}];
+  let cx = terrorist.x, cy = terrorist.y;
+  for (let i = 0; i < 8; i++) {
+    const shuffled = shuffle([...dirs]);
+    let moved = false;
+    for (const d of shuffled) {
+      const nx = cx + d.dx, ny = cy + d.dy;
+      if (isWalkable(floor, nx, ny)) {
+        path.push({x: nx, y: ny});
+        cx = nx; cy = ny;
+        moved = true;
+        break;
+      }
+    }
+    if (!moved) path.push({x: cx, y: cy});
+  }
+  terrorist.patrolPath = path;
+  terrorist.patrolIndex = 0;
+}
+
+function canDetectPlayer(terrorist, player) {
+  if (terrorist.floor !== player.floor) return false;
+  if (player.status === 'hidden') return false;
+  const dx = player.x - terrorist.x;
+  const dy = player.y - terrorist.y;
+  if (dx !== 0 && dy !== 0) return false;
+  const dist = Math.abs(dx) + Math.abs(dy);
+  if (dist > C.DETECT_RANGE || dist === 0) return false;
+  const sx = dx === 0 ? 0 : (dx > 0 ? 1 : -1);
+  const sy = dy === 0 ? 0 : (dy > 0 ? 1 : -1);
+  let cx = terrorist.x + sx, cy = terrorist.y + sy;
+  while (cx !== player.x || cy !== player.y) {
+    if (getTile(terrorist.floor, cx, cy) === TileType.WALL) return false;
+    cx += sx; cy += sy;
+  }
+  return true;
+}
+
+function manhattanDist(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); }
+
+function findPathSimple(floor, fx, fy, tx, ty) {
+  // 简化A*寻路
+  const open = [{x:fx, y:fy, g:0, h:0, f:0, parent:null}];
+  const closed = new Set();
+  const key = (x,y) => x + ',' + y;
+  const dirs = [{dx:0,dy:-1},{dx:0,dy:1},{dx:-1,dy:0},{dx:1,dy:0}];
+
+  while (open.length > 0) {
+    open.sort((a,b) => a.f - b.f);
+    const cur = open.shift();
+    if (cur.x === tx && cur.y === ty) {
+      const path = [];
+      let n = cur;
+      while (n.parent) { path.unshift({x:n.x, y:n.y}); n = n.parent; }
+      return path;
+    }
+    closed.add(key(cur.x, cur.y));
+    for (const d of dirs) {
+      const nx = cur.x + d.dx, ny = cur.y + d.dy;
+      if (!isWalkable(floor, nx, ny) || closed.has(key(nx, ny))) continue;
+      const g = cur.g + 1;
+      const h = Math.abs(nx - tx) + Math.abs(ny - ty);
+      const existing = open.find(n => n.x === nx && n.y === ny);
+      if (existing) {
+        if (g < existing.g) { existing.g = g; existing.f = g + h; existing.parent = cur; }
+      } else {
+        open.push({x:nx, y:ny, g, h, f:g+h, parent:cur});
+      }
+    }
+    if (open.length > 200) break; // 安全限制
+  }
+  return [];
+}
+
+function terroristUpdate(t) {
+  if (t.status === 'dead') return;
+  t.attackedThisTurn = false;
+  const p = state.player;
+
+  // 检测玩家
+  if (canDetectPlayer(t, p)) {
+    t.status = 'alert';
+  }
+
+  if (t.status === 'alert' && t.floor === p.floor) {
+    // 已经同格 → 攻击（不移动）
+    if (t.x === p.x && t.y === p.y && p.status === 'active') {
+      terroristAttackPlayer(t);
+      return;
+    }
+    // 追击移动
+    const path = findPathSimple(t.floor, t.x, t.y, p.x, p.y);
+    if (path.length > 0) {
+      const next = path[0];
+      const blocked = state.terrorists.some(ot =>
+        ot.id !== t.id && ot.status !== 'dead' && ot.floor === t.floor && ot.x === next.x && ot.y === next.y
+      );
+      if (!blocked) { t.x = next.x; t.y = next.y; }
+    }
+    // 移动后到达同格 → 攻击（本回合只攻击这一次）
+    if (t.x === p.x && t.y === p.y && p.status === 'active' && !t.attackedThisTurn) {
+      terroristAttackPlayer(t);
+    }
+    // 如果看不到玩家了，回到巡逻
+    if (!canDetectPlayer(t, p) && !(t.x === p.x && t.y === p.y)) {
+      t.status = 'patrol';
+      generatePatrolPath(t, t.floor);
+    }
+  } else if (t.status === 'patrol') {
+    // 巡逻移动
+    if (t.patrolPath.length === 0) generatePatrolPath(t, t.floor);
+    const target = t.patrolPath[t.patrolIndex % t.patrolPath.length];
+    if (target && isWalkable(t.floor, target.x, target.y)) {
+      const blocked = state.terrorists.some(ot =>
+        ot.id !== t.id && ot.status !== 'dead' && ot.floor === t.floor && ot.x === target.x && ot.y === target.y
+      );
+      if (!blocked) { t.x = target.x; t.y = target.y; }
+    }
+    t.patrolIndex = (t.patrolIndex + 1) % t.patrolPath.length;
+    // 巡逻中也检测玩家
+    if (canDetectPlayer(t, p)) t.status = 'alert';
+  }
+}
+
+function terroristAttackPlayer(t) {
+  const p = state.player;
+  t.attackedThisTurn = true;
+  // 有盔甲或头盔时扣50，否则扣100
+  const hasArmor = (p.bodyArmor && p.bodyArmor.durability > 0) || (p.helmet && p.helmet.durability > 0);
+  const dmg = hasArmor ? C.TERROR_DMG_ARMORED : C.TERROR_DMG;
+  // 直接扣血，不走防具减伤计算（简化模型：有防具=50，无防具=100）
+  p.health = Math.max(0, p.health - dmg);
+  // 消耗防具耐久
+  if (hasArmor) {
+    if (p.bodyArmor && p.bodyArmor.durability > 0) {
+      p.bodyArmor.durability -= 25;
+      if (p.bodyArmor.durability <= 0) { p.bodyArmor = null; addNotification('盔甲已损坏！', 'damage'); }
+    }
+    if (p.helmet && p.helmet.durability > 0) {
+      p.helmet.durability -= 25;
+      if (p.helmet.durability <= 0) { p.helmet = null; addNotification('头盔已损坏！', 'damage'); }
+    }
+  }
+  if (p.health <= 0) state.phase = 'gameover';
+  AudioSystem.playSFX('damage');
+  addNotification('受到恐怖分子攻击！-' + dmg + 'HP', 'damage');
+}
+
+function updateAllTerrorists() {
+  state.terrorists.forEach(t => terroristUpdate(t));
+}
+
+// ============================================================
+// 战斗系统
+// ============================================================
+function calculateDamage(baseDmg, armor) {
+  if (!armor || armor.durability <= 0) return { actual: baseDmg, armorDmg: 0 };
+  const absorbed = Math.floor(baseDmg * armor.damageReduction);
+  const armorDmg = Math.min(absorbed, armor.durability);
+  const actual = baseDmg - armorDmg;
+  return { actual, armorDmg };
+}
+
+function damageToPlayer(baseDmg) {
+  const p = state.player;
+  let remaining = baseDmg;
+
+  // 盔甲减伤
+  if (p.bodyArmor && p.bodyArmor.durability > 0) {
+    const r = calculateDamage(remaining, p.bodyArmor);
+    remaining = r.actual;
+    p.bodyArmor.durability -= r.armorDmg;
+    if (p.bodyArmor.durability <= 0) {
+      p.bodyArmor = null;
+      addNotification('盔甲已损坏！', 'damage');
+    }
+  }
+  // 头盔减伤
+  if (p.helmet && p.helmet.durability > 0) {
+    const r = calculateDamage(remaining, p.helmet);
+    remaining = r.actual;
+    p.helmet.durability -= r.armorDmg;
+    if (p.helmet.durability <= 0) {
+      p.helmet = null;
+      addNotification('头盔已损坏！', 'damage');
+    }
+  }
+
+  p.health = Math.max(0, p.health - remaining);
+  if (p.health <= 0) state.phase = 'gameover';
+}
+
+function damageToTerrorist(tIdx, dmg) {
+  const t = state.terrorists[tIdx];
+  if (!t || t.status === 'dead') return;
+  t.health = Math.max(0, t.health - dmg);
+  if (t.health <= 0) {
+    t.status = 'dead';
+    state.eliminatedCount++;
+  }
+}
+
+function playerFire() {
+  const p = state.player;
+  if (p.status === 'hidden') {
+    addNotification('躲藏中无法开火！', 'info');
+    return false;
+  }
+  const w = p.weapons[p.equippedWeaponIndex];
+  if (!w) return false;
+
+  // 弹药检查
+  if (w.ammo !== Infinity && w.ammo <= 0) {
+    addNotification('弹药不足！', 'info');
+    return false;
+  }
+
+  // 消耗弹药
+  if (w.ammo !== Infinity) w.ammo--;
+
+  if (w.range === 'line') {
+    // 直线射击
+    AudioSystem.playSFX(w.type === 'ak47' ? 'ak47' : 'pistol');
+    const cells = getLineOfSight(p.floor, p.x, p.y, p.facing);
+    for (const cell of cells) {
+      const tIdx = state.terrorists.findIndex(t =>
+        t.status !== 'dead' && t.floor === p.floor && t.x === cell.x && t.y === cell.y
+      );
+      if (tIdx >= 0) {
+        damageToTerrorist(tIdx, w.damage);
+        addNotification(WEAPON_NAMES[w.type] + '命中！-' + w.damage, 'info');
+        break; // 命中第一个
+      }
+    }
+    return true;
+  } else if (w.range === 'radius') {
+    // 手榴弹：在玩家朝向方向2格处爆炸
+    AudioSystem.playSFX('explosion');
+    const d = {up:{dx:0,dy:-1},down:{dx:0,dy:1},left:{dx:-1,dy:0},right:{dx:1,dy:0}}[p.facing];
+    const tx = p.x + d.dx * 2, ty = p.y + d.dy * 2;
+    grenadeExplosion(tx, ty);
+    return true;
+  } else if (w.range === 'tile') {
+    // 燃烧弹：在玩家朝向方向2格处创建火焰
+    AudioSystem.playSFX('explosion');
+    const d = {up:{dx:0,dy:-1},down:{dx:0,dy:1},left:{dx:-1,dy:0},right:{dx:1,dy:0}}[p.facing];
+    const tx = p.x + d.dx * 2, ty = p.y + d.dy * 2;
+    incendiaryExplosion(tx, ty);
+    return true;
+  }
+  return false;
+}
+
+function grenadeExplosion(cx, cy) {
+  const floor = state.player.floor;
+  // 对范围内所有角色造成伤害
+  state.terrorists.forEach((t, idx) => {
+    if (t.status !== 'dead' && t.floor === floor) {
+      if (manhattanDist(t, {x:cx,y:cy}) <= C.GRENADE_RADIUS) {
+        damageToTerrorist(idx, WEAPON_CONFIGS.grenade.damage);
+      }
+    }
+  });
+  // 对玩家也可能造成伤害
+  if (manhattanDist(state.player, {x:cx,y:cy}) <= C.GRENADE_RADIUS) {
+    damageToPlayer(WEAPON_CONFIGS.grenade.damage);
+    addNotification('被手榴弹波及！', 'damage');
+  }
+  addNotification('手榴弹爆炸！', 'info');
+}
+
+function incendiaryExplosion(cx, cy) {
+  const floor = state.player.floor;
+  state.fireZones.push({
+    x: cx, y: cy, floor, remainingTurns: C.FIRE_DURATION, damagePerTurn: C.FIRE_DMG
+  });
+  addNotification('燃烧弹投出！火焰持续' + C.FIRE_DURATION + '回合', 'info');
+}
+
+function processFireZones() {
+  state.fireZones = state.fireZones.filter(fz => {
+    // 对区域内角色造成伤害
+    state.terrorists.forEach((t, idx) => {
+      if (t.status !== 'dead' && t.floor === fz.floor && t.x === fz.x && t.y === fz.y) {
+        damageToTerrorist(idx, fz.damagePerTurn);
+      }
+    });
+    if (state.player.floor === fz.floor && state.player.x === fz.x && state.player.y === fz.y) {
+      damageToPlayer(fz.damagePerTurn);
+      addNotification('被火焰灼伤！-' + fz.damagePerTurn, 'damage');
+    }
+    fz.remainingTurns--;
+    return fz.remainingTurns > 0;
+  });
+}
+
+// ============================================================
+// 玩家系统
+// ============================================================
+function playerMove(dir) {
+  const p = state.player;
+  if (p.status === 'hidden') {
+    addNotification('请先取消躲藏！', 'info');
+    return false;
+  }
+  const d = {up:{dx:0,dy:-1},down:{dx:0,dy:1},left:{dx:-1,dy:0},right:{dx:1,dy:0}}[dir];
+  p.facing = dir;
+  const nx = p.x + d.dx, ny = p.y + d.dy;
+  if (!isWalkable(p.floor, nx, ny)) return false;
+
+  p.x = nx; p.y = ny;
+  AudioSystem.playSFX('step');
+
+  // 楼梯检测
+  const tile = getTile(p.floor, p.x, p.y);
+  if (tile === TileType.STAIR_UP && p.floor < 3) {
+    const newFloor = p.floor + 1;
+    // 传送到上层的下楼梯位置
+    const dest = findStair(newFloor, TileType.STAIR_DOWN);
+    if (dest) {
+      p.floor = newFloor;
+      p.x = dest.x; p.y = dest.y;
+      state.currentFloor = newFloor;
+      addNotification('上楼至 ' + newFloor + 'F', 'info');
+    }
+  } else if (tile === TileType.STAIR_DOWN && p.floor > 1) {
+    const newFloor = p.floor - 1;
+    const dest = findStair(newFloor, TileType.STAIR_UP);
+    if (dest) {
+      p.floor = newFloor;
+      p.x = dest.x; p.y = dest.y;
+      state.currentFloor = newFloor;
+      addNotification('下楼至 ' + newFloor + 'F', 'info');
+    }
+  }
+
+  // 自动拾取物品
+  pickupItems();
+  // 自动解救人质
+  rescueHostages();
+
+  return true;
+}
+
+function findStair(floor, type) {
+  const map = MAPS[floor - 1];
+  for (let y = 0; y < C.GRID; y++)
+    for (let x = 0; x < C.GRID; x++)
+      if (map[y][x] === type) return {x, y};
+  return null;
+}
+
+function toggleHide() {
+  const p = state.player;
+  const tile = getTile(p.floor, p.x, p.y);
+  if (p.status === 'hidden') {
+    p.status = 'active';
+    addNotification('离开躲藏', 'info');
+    return true;
+  }
+  if (tile === TileType.BED) {
+    p.status = 'hidden';
+    addNotification('躲在床下！', 'info');
+    return true;
+  }
+  addNotification('只能在床上躲藏！', 'info');
+  return false;
+}
+
+function switchWeapon() {
+  const p = state.player;
+  if (p.weapons.length <= 1) return;
+  p.equippedWeaponIndex = (p.equippedWeaponIndex + 1) % p.weapons.length;
+  const w = p.weapons[p.equippedWeaponIndex];
+  addNotification('切换至 ' + WEAPON_NAMES[w.type], 'info');
+  AudioSystem.playSFX('pickup');
+}
+
+function pickupItems() {
+  const p = state.player;
+  state.items.forEach(item => {
+    if (item.pickedUp || item.floor !== p.floor || item.x !== p.x || item.y !== p.y) return;
+    item.pickedUp = true;
+    AudioSystem.playSFX('pickup');
+
+    if (item.type === 'bodyArmor') {
+      p.bodyArmor = createArmor('bodyArmor');
+      addNotification('获得盔甲！', 'pickup');
+    } else if (item.type === 'helmet') {
+      p.helmet = createArmor('helmet');
+      addNotification('获得头盔！', 'pickup');
+    } else {
+      // 武器：检查是否已有同类型
+      const existing = p.weapons.find(w => w.type === item.type);
+      if (existing) {
+        // 补充弹药
+        existing.ammo = existing.maxAmmo;
+      } else {
+        p.weapons.push(createWeapon(item.type));
+      }
+      addNotification('获得 ' + WEAPON_NAMES[item.type] + '！', 'pickup');
+    }
+  });
+}
+
+function rescueHostages() {
+  const p = state.player;
+  state.hostages.forEach(h => {
+    if (h.rescued || h.floor !== p.floor || h.x !== p.x || h.y !== p.y) return;
+    h.rescued = true;
+    p.rescuedCount++;
+    AudioSystem.playSFX('rescue');
+    addNotification('解救人质！(' + p.rescuedCount + '/' + C.TOTAL_HOSTAGES + ')', 'rescue');
+    if (p.rescuedCount >= C.TOTAL_HOSTAGES) {
+      state.phase = 'victory';
+    }
+  });
+}
+
+// ============================================================
+// 通知系统
+// ============================================================
+function addNotification(text, type) {
+  if (!state) return;
+  state.notifications.push({ text, type: type || 'info', startTime: Date.now(), duration: C.NOTIFY_DUR });
+}
+
+function cleanNotifications() {
+  const now = Date.now();
+  state.notifications = state.notifications.filter(n => now - n.startTime < n.duration);
+}
+
+// ============================================================
+// HUD更新
+// ============================================================
+function updateHUD() {
+  if (!state) return;
+  const p = state.player;
+  document.getElementById('health').textContent = '❤️ ' + p.health;
+  const w = p.weapons[p.equippedWeaponIndex];
+  const ammoStr = w ? (w.ammo === Infinity ? '∞' : w.ammo + '/' + w.maxAmmo) : '--';
+  document.getElementById('weapon').textContent = '🔫 ' + (w ? WEAPON_NAMES[w.type] : '--') + ' ' + ammoStr;
+
+  let armorStr = '';
+  if (p.bodyArmor) armorStr += '甲' + p.bodyArmor.durability;
+  if (p.helmet) armorStr += (armorStr ? ' ' : '') + '盔' + p.helmet.durability;
+  document.getElementById('armor').textContent = '🛡️ ' + (armorStr || '--');
+  document.getElementById('hostages').textContent = '👥 ' + p.rescuedCount + '/' + C.TOTAL_HOSTAGES;
+  document.getElementById('floor').textContent = '📍 ' + state.currentFloor + 'F';
+}
+
+// ============================================================
+// 音频系统
+// ============================================================
+const AudioSystem = {
+  ctx: null, bgmOsc: null, bgmGain: null, muted: false, initialized: false,
+
+  init() {
+    if (this.initialized) return;
+    try {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.initialized = true;
+    } catch(e) {
+      state.audioEnabled = false;
+    }
+  },
+
+  playBGM() {
+    if (!this.ctx || this.muted) return;
+    this.stopBGM();
+    try {
+      const ctx = this.ctx;
+      this.bgmGain = ctx.createGain();
+      this.bgmGain.gain.value = 0.08;
+      this.bgmGain.connect(ctx.destination);
+
+      // 简单的循环低音BGM
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = 55;
+      // 缓慢的频率变化营造紧张氛围
+      osc.frequency.setValueAtTime(55, ctx.currentTime);
+      osc.frequency.linearRampToValueAtTime(65, ctx.currentTime + 4);
+      osc.frequency.linearRampToValueAtTime(50, ctx.currentTime + 8);
+      osc.frequency.setValueAtTime(55, ctx.currentTime + 12);
+
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = 110;
+
+      const g2 = ctx.createGain();
+      g2.gain.value = 0.03;
+
+      osc.connect(this.bgmGain);
+      osc2.connect(g2);
+      g2.connect(this.bgmGain);
+
+      osc.start();
+      osc2.start();
+      this.bgmOsc = [osc, osc2];
+
+      // 12秒后重新开始
+      this._bgmInterval = setInterval(() => {
+        if (this.muted || !this.ctx) return;
+        try {
+          const t = this.ctx.currentTime;
+          osc.frequency.setValueAtTime(55, t);
+          osc.frequency.linearRampToValueAtTime(65, t + 4);
+          osc.frequency.linearRampToValueAtTime(50, t + 8);
+          osc.frequency.setValueAtTime(55, t + 12);
+        } catch(e) {}
+      }, 12000);
+    } catch(e) {}
+  },
+
+  stopBGM() {
+    if (this.bgmOsc) {
+      this.bgmOsc.forEach(o => { try { o.stop(); } catch(e) {} });
+      this.bgmOsc = null;
+    }
+    if (this._bgmInterval) { clearInterval(this._bgmInterval); this._bgmInterval = null; }
+  },
+
+  playSFX(type) {
+    if (!this.ctx || this.muted) return;
+    try {
+      const ctx = this.ctx;
+      const g = ctx.createGain();
+      g.connect(ctx.destination);
+      const t = ctx.currentTime;
+
+      switch(type) {
+        case 'pistol': {
+          g.gain.setValueAtTime(0.3, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+          const o = ctx.createOscillator();
+          o.type = 'square';
+          o.frequency.setValueAtTime(800, t);
+          o.frequency.exponentialRampToValueAtTime(200, t + 0.1);
+          o.connect(g); o.start(t); o.stop(t + 0.15);
+          break;
+        }
+        case 'ak47': {
+          for (let i = 0; i < 3; i++) {
+            const gi = ctx.createGain();
+            gi.gain.setValueAtTime(0.25, t + i*0.06);
+            gi.gain.exponentialRampToValueAtTime(0.01, t + i*0.06 + 0.08);
+            gi.connect(ctx.destination);
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.setValueAtTime(600, t + i*0.06);
+            o.frequency.exponentialRampToValueAtTime(100, t + i*0.06 + 0.06);
+            o.connect(gi); o.start(t + i*0.06); o.stop(t + i*0.06 + 0.08);
+          }
+          break;
+        }
+        case 'explosion': {
+          g.gain.setValueAtTime(0.5, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.6);
+          const bufSize = ctx.sampleRate * 0.6;
+          const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+          const data = buf.getChannelData(0);
+          for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufSize * 0.15));
+          const src = ctx.createBufferSource();
+          src.buffer = buf;
+          src.connect(g); src.start(t);
+          break;
+        }
+        case 'rescue': {
+          g.gain.value = 0.2;
+          const notes = [523, 659, 784, 1047];
+          notes.forEach((freq, i) => {
+            const o = ctx.createOscillator();
+            o.type = 'sine';
+            o.frequency.value = freq;
+            const gi = ctx.createGain();
+            gi.gain.setValueAtTime(0.2, t + i*0.12);
+            gi.gain.exponentialRampToValueAtTime(0.01, t + i*0.12 + 0.15);
+            o.connect(gi); gi.connect(ctx.destination);
+            o.start(t + i*0.12); o.stop(t + i*0.12 + 0.15);
+          });
+          break;
+        }
+        case 'damage': {
+          g.gain.setValueAtTime(0.35, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+          const o = ctx.createOscillator();
+          o.type = 'sawtooth';
+          o.frequency.setValueAtTime(150, t);
+          o.frequency.exponentialRampToValueAtTime(50, t + 0.15);
+          o.connect(g); o.start(t); o.stop(t + 0.2);
+          break;
+        }
+        case 'pickup': {
+          g.gain.setValueAtTime(0.2, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+          const o = ctx.createOscillator();
+          o.type = 'sine';
+          o.frequency.setValueAtTime(880, t);
+          o.frequency.exponentialRampToValueAtTime(1320, t + 0.1);
+          o.connect(g); o.start(t); o.stop(t + 0.2);
+          break;
+        }
+        case 'step': {
+          g.gain.setValueAtTime(0.08, t);
+          g.gain.exponentialRampToValueAtTime(0.01, t + 0.08);
+          const o = ctx.createOscillator();
+          o.type = 'triangle';
+          o.frequency.value = 200;
+          o.connect(g); o.start(t); o.stop(t + 0.08);
+          break;
+        }
+      }
+    } catch(e) {}
+  },
+
+  toggleMute() {
+    this.muted = !this.muted;
+    if (this.muted) {
+      this.stopBGM();
+    } else {
+      this.playBGM();
+    }
+    document.getElementById('muteBtn').textContent = this.muted ? '🔇' : '🔊';
+  }
+};
+
+// ============================================================
+// 渲染系统
+// ============================================================
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+function calculateTileSize() {
+  const wrap = document.getElementById('canvasWrap');
+  const rect = wrap.getBoundingClientRect();
+  const s = Math.max(C.MIN_TILE, Math.floor(Math.min(rect.width, rect.height) / C.GRID));
+  canvas.width = s * C.GRID;
+  canvas.height = s * C.GRID;
+  tileSize = s;
+  return s;
+}
+
+const TILE_COLORS = {
+  [TileType.FLOOR]: '#2a2a3e',
+  [TileType.WALL]: '#4a4a5e',
+  [TileType.BED]: '#3a2a1e',
+  [TileType.STAIR_UP]: '#2a4a2e',
+  [TileType.STAIR_DOWN]: '#4a2a2e'
+};
+
+function renderMap() {
+  const s = tileSize;
+  const map = MAPS[state.currentFloor - 1];
+  for (let y = 0; y < C.GRID; y++) {
+    for (let x = 0; x < C.GRID; x++) {
+      const tile = map[y][x];
+      ctx.fillStyle = TILE_COLORS[tile] || '#2a2a3e';
+      ctx.fillRect(x * s, y * s, s, s);
+
+      // 网格线
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.strokeRect(x * s, y * s, s, s);
+
+      // 特殊标记
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const cx = x * s + s / 2, cy = y * s + s / 2;
+      const fs = Math.max(12, s * 0.45);
+      ctx.font = fs + 'px sans-serif';
+
+      if (tile === TileType.WALL) {
+        ctx.fillStyle = '#5a5a6e';
+        ctx.fillRect(x * s + 2, y * s + 2, s - 4, s - 4);
+      } else if (tile === TileType.BED) {
+        ctx.fillText('🛏️', cx, cy);
+      } else if (tile === TileType.STAIR_UP) {
+        ctx.fillStyle = '#6f6';
+        ctx.fillText('⬆', cx, cy);
+      } else if (tile === TileType.STAIR_DOWN) {
+        ctx.fillStyle = '#f66';
+        ctx.fillText('⬇', cx, cy);
+      }
+    }
+  }
+}
+
+function renderFireZones() {
+  const s = tileSize;
+  state.fireZones.forEach(fz => {
+    if (fz.floor !== state.currentFloor) return;
+    ctx.fillStyle = 'rgba(255, 100, 0, ' + (0.2 + fz.remainingTurns * 0.15) + ')';
+    ctx.fillRect(fz.x * s, fz.y * s, s, s);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = Math.max(12, s * 0.4) + 'px sans-serif';
+    ctx.fillText('🔥', fz.x * s + s/2, fz.y * s + s/2);
+  });
+}
+
+function renderItems() {
+  const s = tileSize;
+  const icons = { ak47:'🔫', pistol:'🔫', grenade:'💣', incendiary:'🧨', bodyArmor:'🦺', helmet:'⛑️' };
+  state.items.forEach(item => {
+    if (item.pickedUp || item.floor !== state.currentFloor) return;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = Math.max(10, s * 0.35) + 'px sans-serif';
+    ctx.fillText(icons[item.type] || '📦', item.x * s + s/2, item.y * s + s/2);
+  });
+}
+
+function renderHostages() {
+  const s = tileSize;
+  state.hostages.forEach(h => {
+    if (h.rescued || h.floor !== state.currentFloor) return;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = Math.max(12, s * 0.5) + 'px sans-serif';
+    ctx.fillText('👤', h.x * s + s/2, h.y * s + s/2);
+    // 绿色光环
+    ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(h.x * s + s/2, h.y * s + s/2, s * 0.4, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+}
+
+function renderTerrorists() {
+  const s = tileSize;
+  state.terrorists.forEach(t => {
+    if (t.status === 'dead' || t.floor !== state.currentFloor) return;
+    const cx = t.x * s + s/2, cy = t.y * s + s/2;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = Math.max(14, s * 0.55) + 'px sans-serif';
+    ctx.fillText('👿', cx, cy);
+    // 警戒标记
+    if (t.status === 'alert') {
+      ctx.fillStyle = '#ff0';
+      ctx.font = Math.max(8, s * 0.25) + 'px sans-serif';
+      ctx.fillText('❗', cx + s * 0.3, cy - s * 0.3);
+    }
+  });
+}
+
+function renderPlayer() {
+  const s = tileSize;
+  const p = state.player;
+  if (p.floor !== state.currentFloor) return;
+  const cx = p.x * s + s/2, cy = p.y * s + s/2;
+
+  if (p.status === 'hidden') {
+    ctx.globalAlpha = 0.4;
+  }
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = Math.max(14, s * 0.55) + 'px sans-serif';
+  ctx.fillText('🧑‍✈️', cx, cy);
+
+  // 朝向指示（小箭头在角色旁边）
+  const arrowOffset = s * 0.4;
+  const arrowPos = {
+    up:    { ax: cx, ay: cy - arrowOffset },
+    down:  { ax: cx, ay: cy + arrowOffset },
+    left:  { ax: cx - arrowOffset, ay: cy },
+    right: { ax: cx + arrowOffset, ay: cy }
+  }[p.facing];
+  const dirArrow = {up:'▲', down:'▼', left:'◀', right:'▶'}[p.facing];
+  ctx.fillStyle = '#4488ff';
+  ctx.font = 'bold ' + Math.max(8, s * 0.2) + 'px sans-serif';
+  ctx.fillText(dirArrow, arrowPos.ax, arrowPos.ay);
+
+  ctx.globalAlpha = 1.0;
+
+  if (p.status === 'hidden') {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.font = Math.max(8, s * 0.2) + 'px sans-serif';
+    ctx.fillText('隐藏', cx, cy + s * 0.4);
+  }
+}
+
+function renderNotifications() {
+  cleanNotifications();
+  const w = canvas.width, h = canvas.height;
+  const notifs = state.notifications;
+  notifs.forEach((n, i) => {
+    const alpha = Math.max(0, 1 - (Date.now() - n.startTime) / n.duration);
+    const y = 30 + i * 28;
+    ctx.globalAlpha = alpha;
+    const colors = { rescue:'#4caf50', pickup:'#ff9800', damage:'#f44336', info:'#2196f3' };
+    ctx.fillStyle = colors[n.type] || '#2196f3';
+    const tw = ctx.measureText(n.text).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    const pad = 8;
+    ctx.beginPath();
+    ctx.roundRect(w/2 - tw/2 - pad, y - 10, tw + pad*2, 24, 6);
+    ctx.fill();
+    ctx.fillStyle = colors[n.type] || '#fff';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '13px sans-serif';
+    ctx.fillText(n.text, w/2, y + 2);
+    ctx.globalAlpha = 1;
+  });
+}
+
+// ============================================================
+// 游戏画面（开始/胜利/失败）
+// ============================================================
+function renderStartScreen() {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = 'rgba(0,0,0,0.88)';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ff6b35';
+  ctx.font = 'bold ' + Math.min(28, w * 0.08) + 'px sans-serif';
+  ctx.fillText('🏠 床下潜伏', w/2, h * 0.2);
+
+  ctx.fillStyle = '#e0e0e0';
+  ctx.font = Math.min(16, w * 0.045) + 'px sans-serif';
+  ctx.fillText('解救人质 · 消灭恐怖分子', w/2, h * 0.3);
+
+  ctx.fillStyle = '#aaa';
+  ctx.font = Math.min(13, w * 0.038) + 'px sans-serif';
+  const instr = [
+    '🎯 在3层建筑中找到并解救9名人质',
+    '🛏️ 躲在床下可以避免被发现',
+    '🔫 收集武器消灭恐怖分子',
+    '⬆⬇ 通过楼梯在楼层间移动'
+  ];
+  instr.forEach((t, i) => ctx.fillText(t, w/2, h * 0.42 + i * 22));
+
+  // 按钮
+  const btnW = Math.min(160, w * 0.5), btnH = 48;
+  const btnX = w/2 - btnW/2, btnY = h * 0.72;
+  ctx.fillStyle = '#ff6b35';
+  ctx.beginPath();
+  ctx.roundRect(btnX, btnY, btnW, btnH, 12);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('开始游戏', w/2, btnY + btnH/2 + 1);
+
+  screenBtn = { btnX, btnY, btnW, btnH };
+}
+
+function renderVictoryScreen() {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = 'rgba(0,80,0,0.88)';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#4caf50';
+  ctx.font = 'bold ' + Math.min(30, w * 0.085) + 'px sans-serif';
+  ctx.fillText('🎉 任务完成！', w/2, h * 0.18);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = Math.min(16, w * 0.045) + 'px sans-serif';
+  const elapsed = Math.floor((Date.now() - state.startTime) / 1000);
+  const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
+  const stats = [
+    '⏱️ 通关时间：' + mins + '分' + String(secs).padStart(2,'0') + '秒',
+    '💀 消灭敌人：' + state.eliminatedCount + ' / ' + C.TOTAL_TERRORISTS,
+    '👥 解救人质：' + state.player.rescuedCount + ' / ' + C.TOTAL_HOSTAGES,
+    '🔄 总回合数：' + state.turnCount
+  ];
+  stats.forEach((t, i) => ctx.fillText(t, w/2, h * 0.35 + i * 30));
+
+  const btnW = Math.min(160, w * 0.5), btnH = 48;
+  const btnX = w/2 - btnW/2, btnY = h * 0.72;
+  ctx.fillStyle = '#4caf50';
+  ctx.beginPath(); ctx.roundRect(btnX, btnY, btnW, btnH, 12); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('重新开始', w/2, btnY + btnH/2 + 1);
+  screenBtn = { btnX, btnY, btnW, btnH };
+}
+
+function renderGameOverScreen() {
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = 'rgba(120,0,0,0.88)';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f44336';
+  ctx.font = 'bold ' + Math.min(30, w * 0.085) + 'px sans-serif';
+  ctx.fillText('💀 任务失败', w/2, h * 0.22);
+
+  ctx.fillStyle = '#e0e0e0';
+  ctx.font = Math.min(15, w * 0.042) + 'px sans-serif';
+  const stats = [
+    '👥 已解救人质：' + state.player.rescuedCount + ' / ' + C.TOTAL_HOSTAGES,
+    '💀 消灭敌人：' + state.eliminatedCount + ' / ' + C.TOTAL_TERRORISTS,
+    '🔄 存活回合：' + state.turnCount
+  ];
+  stats.forEach((t, i) => ctx.fillText(t, w/2, h * 0.4 + i * 28));
+
+  const btnW = Math.min(160, w * 0.5), btnH = 48;
+  const btnX = w/2 - btnW/2, btnY = h * 0.7;
+  ctx.fillStyle = '#f44336';
+  ctx.beginPath(); ctx.roundRect(btnX, btnY, btnW, btnH, 12); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('重新开始', w/2, btnY + btnH/2 + 1);
+  screenBtn = { btnX, btnY, btnW, btnH };
+}
+
+// ============================================================
+// 输入系统
+// ============================================================
+let pendingAction = null;
+
+function queueAction(action) {
+  if (state && state.phase === 'playing') pendingAction = action;
+}
+
+function consumeAction() {
+  const a = pendingAction;
+  pendingAction = null;
+  return a;
+}
+
+// 方向键
+document.querySelectorAll('#dpad button').forEach(btn => {
+  const dir = btn.dataset.dir;
+  const handler = (e) => { e.preventDefault(); queueAction({type:'move', direction:dir}); };
+  btn.addEventListener('touchstart', handler, {passive:false});
+  btn.addEventListener('click', handler);
+});
+
+// 动作按钮
+document.getElementById('fireBtn').addEventListener('click', (e) => { e.preventDefault(); queueAction({type:'fire'}); });
+document.getElementById('fireBtn').addEventListener('touchstart', (e) => { e.preventDefault(); queueAction({type:'fire'}); }, {passive:false});
+
+document.getElementById('hideBtn').addEventListener('click', (e) => { e.preventDefault(); queueAction({type:'hide'}); });
+document.getElementById('hideBtn').addEventListener('touchstart', (e) => { e.preventDefault(); queueAction({type:'hide'}); }, {passive:false});
+
+document.getElementById('switchBtn').addEventListener('click', (e) => { e.preventDefault(); queueAction({type:'switchWeapon'}); });
+document.getElementById('switchBtn').addEventListener('touchstart', (e) => { e.preventDefault(); queueAction({type:'switchWeapon'}); }, {passive:false});
+
+// 静音按钮
+document.getElementById('muteBtn').addEventListener('click', () => AudioSystem.toggleMute());
+
+// 键盘
+document.addEventListener('keydown', (e) => {
+  const keyMap = {
+    'ArrowUp':'up', 'ArrowDown':'down', 'ArrowLeft':'left', 'ArrowRight':'right',
+    'w':'up', 's':'down', 'a':'left', 'd':'right'
+  };
+  if (keyMap[e.key]) { e.preventDefault(); queueAction({type:'move', direction:keyMap[e.key]}); }
+  else if (e.key === ' ' || e.key === 'f') { e.preventDefault(); queueAction({type:'fire'}); }
+  else if (e.key === 'h' || e.key === 'e') { e.preventDefault(); queueAction({type:'hide'}); }
+  else if (e.key === 'q' || e.key === 'Tab') { e.preventDefault(); queueAction({type:'switchWeapon'}); }
+});
+
+// Canvas点击（画面按钮）
+function handleScreenClick(clientX, clientY) {
+  if (!state || !screenBtn) return;
+  if (state.phase !== 'start' && state.phase !== 'victory' && state.phase !== 'gameover') return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const cx = (clientX - rect.left) * scaleX;
+  const cy = (clientY - rect.top) * scaleY;
+  const b = screenBtn;
+  if (cx >= b.btnX && cx <= b.btnX + b.btnW && cy >= b.btnY && cy <= b.btnY + b.btnH) {
+    if (state.phase === 'start') {
+      initGame();
+    } else {
+      resetGame();
+    }
+  }
+}
+
+canvas.addEventListener('click', (e) => handleScreenClick(e.clientX, e.clientY));
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) handleScreenClick(e.touches[0].clientX, e.touches[0].clientY);
+}, {passive:false});
+
+// 禁止默认触摸行为
+document.addEventListener('touchmove', (e) => e.preventDefault(), {passive:false});
+document.addEventListener('touchstart', (e) => {
+  if (e.touches.length > 1) e.preventDefault();
+}, {passive:false});
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('gesturechange', (e) => e.preventDefault());
+
+// ============================================================
+// 回合处理
+// ============================================================
+function processTurn(action) {
+  if (!state || state.phase !== 'playing') return;
+  let turnUsed = false;
+
+  switch(action.type) {
+    case 'move':
+      turnUsed = playerMove(action.direction);
+      break;
+    case 'fire':
+      turnUsed = playerFire();
+      break;
+    case 'hide':
+      turnUsed = toggleHide();
+      break;
+    case 'switchWeapon':
+      switchWeapon();
+      turnUsed = false; // 切换武器不消耗回合
+      break;
+  }
+
+  if (turnUsed && state.phase === 'playing') {
+    state.turnCount++;
+    // 恐怖分子行动
+    updateAllTerrorists();
+    // 火焰区域处理
+    processFireZones();
+    // 检查同格恐怖分子（玩家可能被追上）
+    checkTerroristCollision();
+  }
+
+  updateHUD();
+}
+
+function checkTerroristCollision() {
+  const p = state.player;
+  if (p.status === 'hidden') return;
+  state.terrorists.forEach(t => {
+    if (t.status === 'dead' || t.floor !== p.floor) return;
+    if (t.x === p.x && t.y === p.y) {
+      // 恐怖分子已在AI阶段攻击过，这里不重复
+    }
+  });
+}
+
+// ============================================================
+// 游戏主循环
+// ============================================================
+function gameLoop(timestamp) {
+  requestAnimationFrame(gameLoop);
+
+  // 帧率控制
+  if (timestamp - lastRenderTime < 1000 / C.FPS) return;
+  lastRenderTime = timestamp;
+
+  if (!state) return;
+
+  calculateTileSize();
+
+  // 处理输入
+  if (state.phase === 'playing') {
+    const action = consumeAction();
+    if (action) processTurn(action);
+  }
+
+  // 渲染
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (state.phase === 'playing') {
+    renderMap();
+    renderFireZones();
+    renderItems();
+    renderHostages();
+    renderTerrorists();
+    renderPlayer();
+    renderNotifications();
+  } else if (state.phase === 'start') {
+    renderStartScreen();
+  } else if (state.phase === 'victory') {
+    renderMap();
+    renderFireZones();
+    renderItems();
+    renderHostages();
+    renderTerrorists();
+    renderPlayer();
+    renderVictoryScreen();
+  } else if (state.phase === 'gameover') {
+    renderMap();
+    renderFireZones();
+    renderItems();
+    renderHostages();
+    renderTerrorists();
+    renderPlayer();
+    renderGameOverScreen();
+  }
+}
+
+// ============================================================
+// 初始化
+// ============================================================
+window.addEventListener('resize', () => { if (state) calculateTileSize(); });
+
+state = createGameState();
+calculateTileSize();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
